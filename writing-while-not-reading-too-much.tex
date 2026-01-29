@@ -1,0 +1,150 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  framerule=0.2pt,
+  rulecolor=\color{black!20},
+  numbers=none,
+  tabsize=2,
+  showstringspaces=false
+}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue,
+  citecolor=black
+}
+\begin{document}
+\title{Writing While Not Reading Too Much}
+\date{2018-04-01 07:17:15}
+\maketitle
+
+\noindent\textit{Original: }\texttt{\detokenize{https://nicknash.me/2018/04/01/writing-while-not-reading-too-much/}}\par
+\medskip
+\section{Recap}
+
+My last post (\texttt{\detokenize{http://nicknash.me/2018/03/06/reading-while-writing-without-waiting/}}) described the concurrency construction called Left-Right at a very high level. Left-Right allows for concurrent reading and writing of a data structure with wait-free reads that can run in parallel with a writer. You can think of it as a neat alternative to copy-on-write or a better reader-writer lock, but it's also interesting in its own right.
+
+In this post I'll present an implementation of Left-Right in C\# and describe how it works.
+\section{Starvation}
+
+The main features of the Left-Right construction are the following:
+\begin{enumerate}
+\item It's generic, works with any data structure, and doesn't affect the time complexity of any operations.
+\item Reads and writes can happen concurrently.
+\item Reading is always wait free.
+\item No allocation is required, so no garbage is generated, and no garbage collector is required.
+\item A writer cannot be starved by readers.
+\end{enumerate}
+
+The fifth property -- that writers cannot be starved by readers means that a write operation will never be prevented from completing by read operations. It is also the trickiest part of Left-Right.
+
+As a result, for this post, I'm going to describe the so-called "No Version" variation of Left-Right. It satisfies the first four properties, but readers can (in very unlikely scenarios) starve a writer.
+
+Once you've got your head around this version of Left-Right, adding in the starvation freedom property is much easier to understand.
+
+\section{Reading}
+
+We'll begin by describing how to use Left-Right to read a data structure. This will show the first key idea of Left-Right: It maintains \emph{two} versions of the data-structure, allowing reads to proceed concurrently with a writer.
+
+To keep the description of reads simple, we'll assume the existence of a so-called "Read Indicator", that is used to communicate in-progress reads with potential writers. Here's the interface a read-indicator exposes:
+
+\begin{lstlisting}
+interface IReadIndicator
+{
+    // A reader calls this to tell writers that it is 
+    // reading the data structure
+    void Arrive();
+    // A reader calls this to tell writers that 
+    // it is no longer reading the data structure
+    void Depart();
+    // Returns true if a read in progress (i.e., 
+    // any calls to Arrive without a matching Depart call)
+    bool IsOccupied { get; }
+}
+\end{lstlisting}
+
+We'll ignore the implementation of \texttt{IReadIndicator} for now. Implementations can be very simple -- a single atomic counter will do (and be unscalable in the presence of many threads), or they can be quite intricate and more scalable.
+
+With our read-indicator in hand, the implementation of a read looks something like this:
+
+\begin{lstlisting}
+// An array of the two instances of the data
+// structure we are coordinating access to. For this example, a List
+List[] _instances;
+// An index (either 0 or 1) that tells readers
+// which instance they can safely read.
+int _readIndex;
+// A read indicator, that a reader can use to inform a potential
+// writer that a read is in progress.
+IReadIndicator _readIndicator;
+int Read()
+{
+    _readIndicator.Arrive();
+    var idx = _readIndex;
+    var result = read(instances[idx]);
+    _readIndicator.Depart();
+    return result;
+}
+\end{lstlisting}
+
+This code is hopefully self-explanatory: readers just record their presence during reading. 
+
+\section{Writing}
+
+Writing is a bit trickier than reading, and goes something like this: Write to the instance of the data structure that we're sure there can be no readers reading, wait for readers to finish reading the other instance, and then write to that instance.
+
+A (toy) implementation would look something like this:
+
+\begin{lstlisting}
+void Write()
+{
+    lock(_writersMutex)
+    {
+        var readIndex = _readIndex;
+        var nextReadIndex = Toggle(readIndex);
+        write(instances[nextReadIndex]);
+        _readIndex = nextReadIndex;
+        while(_readIndicator.IsOccupied) ;
+        write(instances[readIndex]);
+    }
+}
+\end{lstlisting}
+
+The first thing to note about this is that writes are blocking: there can only be a single write in progress at once, hence the \texttt{\_writersMutex}.
+
+Next we'll turn to understanding exactly why this write implementation can proceed even in the presence of readers 
+
+\section{Why This Is Correct}
+
+The argument for correctness I'm about to give might seem a bit laboured. I think it's worth it though, because when we switch to the starvation-free version of Left-Right we can use the same tools.
+
+So let's start with some definitions.
+
+Let's define the \emph{end-state} of a reader as the value of \texttt{\_readIndex} it has witnessed at the time it calls \texttt{Depart}. So there are two possible reader end-states: \texttt{0} and \texttt{1}. After a reader calls \texttt{Depart} it is said to \emph{complete} and is not defined to be in any state.
+
+Let's also divide readers into two categories: \emph{pre-arrival} readers and \emph{post-arrival} readers. Pre-arrival readers have not called \texttt{Arrive} on a read-indicator yet. While post-arrival readers have called \texttt{Arrive} on a read-indicator.
+
+Now we can note the key property that makes Left-Right correct: If a writer waits until \texttt{\_readIndicator.IsOccupied} returns \texttt{false} while \texttt{\_readIndex} is \texttt{1} then there cannot be any reader with end-state \texttt{0}. This is because any pre-arrival reader cannot have yet read \texttt{\_readIndex} because it has not yet called \texttt{\_readIndicator.Arrive()}, and hence if it does it must see \texttt{\_readIndex} as \texttt{1}. On the other hand, the wait on \texttt{\_readIndicator.IsOccupied} ensures that any reader with end-state \texttt{0} will complete. Of course, a symmetrical argument applies if a writer changes \texttt{\_readIndex} from \texttt{1} to \texttt{0}.
+
+To be completely explicit, mutual exclusion between readers and writers is assured when a write to proceeds on a given \texttt{\_readIndex} when the only possible reader end-states are the toggle of \texttt{\_readIndex}. Moreover the preceding paragraph shows this is exactly the protocol obeyed by \texttt{Write}, and so this implementation is correct.
+
+\section{Next Time}
+
+The Left-Right implementation just described is nearly the real-deal. The unfortunate thing is that under intense read pressure, readers can starve the writer. This is because the wait on \texttt{\_readIndicator.IsOccupied} may wait on readers that begin after the call to Write began. I hope to describe how to lift this limitation in my next post.
+
+Lastly, there is a gap in the explanations above: I've omitted all reference to the required memory ordering on the operations (e.g. so called 'volatile' operations in Java and C\# or 'atomic' operations in C++), this is also something I hope to give full details of in a future post. In the mean-time, there is a RelaSharp example of this Left-Right implementation, that includes memory fencing here: StarvationLeftRight.cs (\texttt{\detokenize{https://github.com/nicknash/RelaSharp/blob/master/Examples/CLR/StarvationLeftRight.cs}})
+
+\end{document}
