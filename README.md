@@ -14,4 +14,4 @@ The most interesting posts are probably:
 - [Wait-free Reading While Writing](left-right-wait-free-reading-while-writing.pdf)
     - Some exposition of the Left-Right construction, with a little proof of correctness not in other accounts. From my days of digging into the weeds of lock and wait free algorithms.
     - See also my model-checker [RelaSharp](https://github.com/nicknash/RelaSharp) if you're interested in this type of thing. I used implementing it to teach myself about this stuff.
-    - And my rough [implementation](https://github.com/nicknash/SharpLeftRight]) where I used RelaSharp to test correctness.
+    - And my rough [implementation](https://github.com/nicknash/SharpLeftRight) where I used RelaSharp to test correctness.
